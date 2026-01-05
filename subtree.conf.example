@@ -1,0 +1,32 @@
+# Git Subtree Configuration File
+#
+# This file should be placed at .git/subtree.conf in your repository.
+# It defines the subtrees managed by git-subtree.sh
+#
+# Format:
+# [subtree "name"]
+# url = <repository-url>
+# path = <local-path>
+# branch = <branch-name>
+# squash = <true|false>
+
+# Example: Add a library as a subtree
+[subtree "mylib"]
+url = https://github.com/user/mylib.git
+path = vendor/mylib
+branch = main
+squash = true
+
+# Example: Add documentation
+[subtree "docs"]
+url = https://github.com/user/docs.git
+path = docs/external
+branch = master
+squash = false
+
+# Example: Add a component
+[subtree "auth"]
+url = https://github.com/company/auth-module.git
+path = src/components/auth
+branch = v2
+squash = true

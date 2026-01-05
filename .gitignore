@@ -1,0 +1,19 @@
+# Testing
+/tmp/
+*.tmp
+*.tmp.*
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Build artifacts (if any future additions)
+dist/
+build/
