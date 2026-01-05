@@ -386,7 +386,7 @@ cmd_add() {
     
     # Auto-detect name if not provided
     if [[ -z "$name" ]]; then
-        err "Missing required argument: <name>. Usage: git-sub-add <name> [options]"
+        err "Missing required argument 'name'. Usage: git-sub-add <name> [options]"
     fi
     
     # Check if already exists
@@ -407,10 +407,10 @@ cmd_add() {
     
     # Validate required fields
     if [[ -z "$path" ]]; then
-        err "Missing required option: --path. Usage: git-sub-add <name> --path <path> --url <url> [options]"
+        err "Missing required option '--path'. Usage: git-sub-add <name> --path <path> --url <url> [options]"
     fi
     if [[ -z "$url" ]]; then
-        err "Missing required option: --url. Usage: git-sub-add <name> --path <path> --url <url> [options]"
+        err "Missing required option '--url'. Usage: git-sub-add <name> --path <path> --url <url> [options]"
     fi
     [[ -z "$branch" ]] && branch="main"
     
