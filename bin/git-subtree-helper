@@ -104,8 +104,7 @@ auto_detect_name() {
         echo "${matches[0]}"
         return 0
     else
-        echo "ERROR: Multiple subtrees match directory '$first_level': ${matches[*]}. Please specify name explicitly." >&2
-        return 1
+        err "Multiple subtrees match directory '$first_level': ${matches[*]}. Please specify name explicitly."
     fi
 }
 
