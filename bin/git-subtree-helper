@@ -104,7 +104,8 @@ auto_detect_name() {
         echo "${matches[0]}"
         return 0
     else
-        err "Multiple subtrees match directory '$first_level': ${matches[*]}. Please specify name explicitly."
+        echo "ERROR: Multiple subtrees match directory '$first_level': ${matches[*]}. Please specify name explicitly." >&2
+        return 1
     fi
 }
 
@@ -237,6 +238,7 @@ get_command() {
 
 # Usage for add command
 usage_add() {
+    local exit_code="${1:-0}"
     cat <<EOF
 Usage: git-sub-add [name] [options]
 
@@ -262,11 +264,12 @@ Examples:
 After adding, configuration is saved to .git/subtree.conf
 
 EOF
-    exit 0
+    exit "$exit_code"
 }
 
 # Usage for pull command
 usage_pull() {
+    local exit_code="${1:-0}"
     cat <<EOF
 Usage: git-sub-pull [name]
 
@@ -286,11 +289,12 @@ Examples:
 Configuration is read from .git/subtree.conf and never modified.
 
 EOF
-    exit 0
+    exit "$exit_code"
 }
 
 # Usage for push command
 usage_push() {
+    local exit_code="${1:-0}"
     cat <<EOF
 Usage: git-sub-push [name]
 
@@ -310,7 +314,7 @@ Examples:
 Configuration is read from .git/subtree.conf and never modified.
 
 EOF
-    exit 0
+    exit "$exit_code"
 }
 
 # Usage for main helper
@@ -386,7 +390,7 @@ cmd_add() {
     
     # Auto-detect name if not provided
     if [[ -z "$name" ]]; then
-        name="$(auto_detect_name)" || err "Could not auto-detect subtree name. Please provide the name as an argument."
+        name="$(auto_detect_name)" || usage_add 1
         echo "Auto-detected subtree name: $name" >&2
     fi
     
@@ -452,7 +456,7 @@ cmd_pull() {
     
     # Auto-detect name if not provided
     if [[ -z "$name" ]]; then
-        name="$(auto_detect_name)" || err "Could not auto-detect subtree name. Please provide the name as an argument."
+        name="$(auto_detect_name)" || usage_pull 1
         echo "Auto-detected subtree name: $name" >&2
     fi
     
@@ -508,7 +512,7 @@ cmd_push() {
     
     # Auto-detect name if not provided
     if [[ -z "$name" ]]; then
-        name="$(auto_detect_name)" || err "Could not auto-detect subtree name. Please provide the name as an argument."
+        name="$(auto_detect_name)" || usage_push 1
         echo "Auto-detected subtree name: $name" >&2
     fi
     
