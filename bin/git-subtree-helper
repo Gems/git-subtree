@@ -239,12 +239,12 @@ get_command() {
 usage_add() {
     local exit_code="${1:-0}"
     cat <<EOF
-Usage: git-sub-add [name] [options]
+Usage: git-sub-add <name> [options]
 
 Add a new git subtree and save configuration.
 
 Arguments:
-  name              Name of the subtree (if omitted, will auto-detect from current directory)
+  name              Name of the subtree (required)
 
 Options:
   --path PATH       Local path for the subtree (required for new subtrees)
@@ -252,7 +252,6 @@ Options:
   --branch BRANCH   Branch to track (default: main)
   --no-squash       Disable squash mode (default: enabled)
   --force           Overwrite existing configuration
-  --install         Install global git aliases
   --help, -h        Show this help
 
 Examples:
@@ -278,7 +277,6 @@ Arguments:
   name              Name of the subtree (if omitted, will auto-detect from current directory)
 
 Options:
-  --install         Install global git aliases
   --help, -h        Show this help
 
 Examples:
@@ -303,7 +301,6 @@ Arguments:
   name              Name of the subtree (if omitted, will auto-detect from current directory)
 
 Options:
-  --install         Install global git aliases
   --help, -h        Show this help
 
 Examples:
@@ -389,8 +386,7 @@ cmd_add() {
     
     # Auto-detect name if not provided
     if [[ -z "$name" ]]; then
-        name="$(auto_detect_name)" || usage_add 1
-        echo "Auto-detected subtree name: $name" >&2
+        err "Missing required argument: <name>. Usage: git-sub-add <name> [options]"
     fi
     
     # Check if already exists
@@ -410,8 +406,12 @@ cmd_add() {
     fi
     
     # Validate required fields
-    [[ -z "$path" ]] && err "Missing required option: --path"
-    [[ -z "$url" ]] && err "Missing required option: --url"
+    if [[ -z "$path" ]]; then
+        err "Missing required option: --path. Usage: git-sub-add <name> --path <path> --url <url> [options]"
+    fi
+    if [[ -z "$url" ]]; then
+        err "Missing required option: --url. Usage: git-sub-add <name> --path <path> --url <url> [options]"
+    fi
     [[ -z "$branch" ]] && branch="main"
     
     # Build git subtree add command
