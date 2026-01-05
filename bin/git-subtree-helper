@@ -1,0 +1,582 @@
+#!/usr/bin/env bash
+#
+# git-subtree-helper - Wrapper around git subtree with INI config support
+#
+# This script can be symlinked as git-sub-add, git-sub-pull, git-sub-push
+# and will dispatch to the appropriate command based on the symlink name.
+#
+
+set -euo pipefail
+
+# Global variables
+SCRIPT_NAME="$(basename "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=""
+CONFIG_FILE=""
+
+# Print error message and exit
+err(){ echo "ERROR: $*" >&2; exit 1; }
+
+# Initialize repo root and config file path
+init_repo() {
+    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || err "Not in a git repository"
+    CONFIG_FILE="$REPO_ROOT/.git/subtree.conf"
+}
+
+# Print command before executing (if not quiet)
+print_cmd() {
+    if [[ "${QUIET:-0}" != "1" ]]; then
+        echo "+ $*" >&2
+    fi
+}
+
+# Execute command with printing
+run_cmd() {
+    print_cmd "$@"
+    "$@"
+}
+
+# Parse config value for a subtree
+# Usage: parse_config <name> <key>
+# Returns: value or empty string
+parse_config() {
+    local name="$1"
+    local key="$2"
+    
+    [[ ! -f "$CONFIG_FILE" ]] && return 0
+    
+    awk -v section="$name" -v key="$key" '
+        /^\[subtree ".*"\]/ {
+            gsub(/^\[subtree "/, "")
+            gsub(/"\]$/, "")
+            in_section = ($0 == section) ? 1 : 0
+            next
+        }
+        /^\[/ { in_section = 0; next }
+        in_section && $0 ~ "^"key"[[:space:]]*=" {
+            sub("^"key"[[:space:]]*=[[:space:]]*", "")
+            print
+            exit
+        }
+    ' "$CONFIG_FILE"
+}
+
+# Check if subtree exists in config
+subtree_exists() {
+    local name="$1"
+    [[ ! -f "$CONFIG_FILE" ]] && return 1
+    grep -q "^\[subtree \"$name\"\]" "$CONFIG_FILE"
+}
+
+# List all subtree names in config
+list_subtrees() {
+    [[ ! -f "$CONFIG_FILE" ]] && return 0
+    grep '^\[subtree ".*"\]' "$CONFIG_FILE" | sed 's/^\[subtree "\(.*\)"\]$/\1/'
+}
+
+# Auto-detect subtree name from current directory
+auto_detect_name() {
+    local current_dir="$PWD"
+    local rel_path="${current_dir#$REPO_ROOT/}"
+    
+    # If we're at repo root, can't auto-detect
+    [[ "$rel_path" == "$current_dir" ]] && return 1
+    
+    # Extract first-level directory
+    local first_level="${rel_path%%/*}"
+    
+    # Find all subtrees whose path starts with this directory
+    local matches=()
+    while IFS= read -r name; do
+        local path
+        path="$(parse_config "$name" "path")"
+        [[ -z "$path" ]] && continue
+        
+        local path_first="${path%%/*}"
+        if [[ "$path_first" == "$first_level" ]]; then
+            matches+=("$name")
+        fi
+    done < <(list_subtrees)
+    
+    if [[ ${#matches[@]} -eq 0 ]]; then
+        return 1
+    elif [[ ${#matches[@]} -eq 1 ]]; then
+        echo "${matches[0]}"
+        return 0
+    else
+        err "Multiple subtrees match directory '$first_level': ${matches[*]}. Please specify name explicitly."
+    fi
+}
+
+# Write or update subtree config atomically
+# Usage: update_config <name> <path> <url> <branch> <squash>
+update_config() {
+    local name="$1"
+    local path="$2"
+    local url="$3"
+    local branch="$4"
+    local squash="$5"
+    
+    # Create config file if it doesn't exist
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        touch "$CONFIG_FILE"
+    fi
+    
+    local temp_file="${CONFIG_FILE}.tmp.$$"
+    local in_section=0
+    local section_found=0
+    
+    # Read existing config and update/add section
+    if [[ -s "$CONFIG_FILE" ]]; then
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^\[subtree\ \"([^\"]+)\"\]$ ]]; then
+                local current_name="${BASH_REMATCH[1]}"
+                if [[ "$current_name" == "$name" ]]; then
+                    in_section=1
+                    section_found=1
+                    # Write updated section
+                    echo "[subtree \"$name\"]" >> "$temp_file"
+                    echo "path = $path" >> "$temp_file"
+                    echo "url = $url" >> "$temp_file"
+                    echo "branch = $branch" >> "$temp_file"
+                    echo "squash = $squash" >> "$temp_file"
+                else
+                    in_section=0
+                    echo "$line" >> "$temp_file"
+                fi
+            elif [[ "$line" =~ ^\[ ]]; then
+                in_section=0
+                echo "$line" >> "$temp_file"
+            elif [[ $in_section -eq 0 ]]; then
+                echo "$line" >> "$temp_file"
+            fi
+            # Skip lines in the section we're replacing
+        done < "$CONFIG_FILE"
+    fi
+    
+    # If section wasn't found, add it
+    if [[ $section_found -eq 0 ]]; then
+        [[ -s "$temp_file" ]] && echo "" >> "$temp_file"
+        echo "[subtree \"$name\"]" >> "$temp_file"
+        echo "path = $path" >> "$temp_file"
+        echo "url = $url" >> "$temp_file"
+        echo "branch = $branch" >> "$temp_file"
+        echo "squash = $squash" >> "$temp_file"
+    fi
+    
+    # Atomic replace
+    mv "$temp_file" "$CONFIG_FILE"
+}
+
+# Install global git aliases
+install_aliases() {
+    echo "Installing global git aliases..."
+    
+    # Find absolute paths for each command
+    for cmd in add pull push; do
+        local symlink_name="git-sub-$cmd"
+        local abs_path=""
+        
+        # Try to find in current directory first
+        if [[ -x "$SCRIPT_DIR/$symlink_name" ]]; then
+            abs_path="$(cd "$SCRIPT_DIR" && pwd)/$symlink_name"
+        elif [[ -x "$SCRIPT_DIR/git-subtree-helper" ]]; then
+            # Create symlink if it doesn't exist
+            abs_path="$(cd "$SCRIPT_DIR" && pwd)/$symlink_name"
+            if [[ ! -e "$abs_path" ]]; then
+                (cd "$SCRIPT_DIR" && ln -s git-subtree-helper "$symlink_name")
+                echo "  Created symlink: $abs_path"
+            fi
+        else
+            # Try to find in PATH
+            abs_path="$(command -v "$symlink_name" 2>/dev/null || true)"
+        fi
+        
+        if [[ -z "$abs_path" ]]; then
+            echo "  WARNING: Could not find $symlink_name, skipping..."
+            continue
+        fi
+        
+        # Set git alias
+        git config --global "alias.sub-$cmd" "!$abs_path"
+        echo "  Configured git alias: git sub-$cmd -> $abs_path"
+    done
+    
+    echo ""
+    echo "Installation complete!"
+    echo ""
+    echo "You can now use:"
+    echo "  git sub-add <name> [options]"
+    echo "  git sub-pull <name>"
+    echo "  git sub-push <name>"
+    
+    exit 0
+}
+
+# Get the command based on script name
+get_command() {
+    case "$SCRIPT_NAME" in
+        git-sub-add|sub-add)
+            echo "add"
+            ;;
+        git-sub-pull|sub-pull)
+            echo "pull"
+            ;;
+        git-sub-push|sub-push)
+            echo "push"
+            ;;
+        git-subtree-helper)
+            echo ""
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+# Usage for add command
+usage_add() {
+    cat <<EOF
+Usage: git-sub-add [name] [options]
+
+Add a new git subtree and save configuration.
+
+Arguments:
+  name              Name of the subtree (if omitted, will auto-detect from current directory)
+
+Options:
+  --path PATH       Local path for the subtree (required for new subtrees)
+  --url URL         Repository URL (required for new subtrees)
+  --branch BRANCH   Branch to track (default: main)
+  --no-squash       Disable squash mode (default: enabled)
+  --force           Overwrite existing configuration
+  --install         Install global git aliases
+  --help, -h        Show this help
+
+Examples:
+  git-sub-add mylib --path vendor/mylib --url https://github.com/user/mylib.git
+  git-sub-add mylib --path vendor/mylib --url https://github.com/user/mylib.git --branch v2
+  git-sub-add mylib  # Use existing config
+
+After adding, configuration is saved to .git/subtree.conf
+
+EOF
+    exit 0
+}
+
+# Usage for pull command
+usage_pull() {
+    cat <<EOF
+Usage: git-sub-pull [name]
+
+Pull updates from a git subtree.
+
+Arguments:
+  name              Name of the subtree (if omitted, will auto-detect from current directory)
+
+Options:
+  --install         Install global git aliases
+  --help, -h        Show this help
+
+Examples:
+  git-sub-pull mylib
+  cd vendor/mylib && git-sub-pull  # Auto-detect
+
+Configuration is read from .git/subtree.conf and never modified.
+
+EOF
+    exit 0
+}
+
+# Usage for push command
+usage_push() {
+    cat <<EOF
+Usage: git-sub-push [name]
+
+Push changes to a git subtree repository.
+
+Arguments:
+  name              Name of the subtree (if omitted, will auto-detect from current directory)
+
+Options:
+  --install         Install global git aliases
+  --help, -h        Show this help
+
+Examples:
+  git-sub-push mylib
+  cd vendor/mylib && git-sub-push  # Auto-detect
+
+Configuration is read from .git/subtree.conf and never modified.
+
+EOF
+    exit 0
+}
+
+# Usage for main helper
+usage_main() {
+    cat <<EOF
+Usage: git-subtree-helper <command>
+
+Git subtree wrapper with configuration file support.
+
+This script should be symlinked as:
+  git-sub-add   - Add a subtree
+  git-sub-pull  - Pull subtree changes
+  git-sub-push  - Push subtree changes
+
+Options:
+  --install     Install global git aliases
+  --help, -h    Show this help
+
+Run git-sub-add --help, git-sub-pull --help, or git-sub-push --help for specific usage.
+
+EOF
+    exit 0
+}
+
+# Execute git subtree add
+cmd_add() {
+    local name=""
+    local path=""
+    local url=""
+    local branch=""
+    local squash="true"
+    local force=0
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --path)
+                path="$2"
+                shift 2
+                ;;
+            --url)
+                url="$2"
+                shift 2
+                ;;
+            --branch)
+                branch="$2"
+                shift 2
+                ;;
+            --no-squash)
+                squash="false"
+                shift
+                ;;
+            --force)
+                force=1
+                shift
+                ;;
+            --help|-h)
+                usage_add
+                ;;
+            -*)
+                err "Unknown option: $1"
+                ;;
+            *)
+                if [[ -z "$name" ]]; then
+                    name="$1"
+                else
+                    err "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Auto-detect name if not provided
+    if [[ -z "$name" ]]; then
+        name="$(auto_detect_name)" || err "Could not auto-detect subtree name. Please provide the name as an argument."
+        echo "Auto-detected subtree name: $name" >&2
+    fi
+    
+    # Check if already exists
+    if subtree_exists "$name" && [[ $force -eq 0 ]]; then
+        # Try to use existing config
+        local existing_path existing_url existing_branch existing_squash
+        existing_path="$(parse_config "$name" "path")"
+        existing_url="$(parse_config "$name" "url")"
+        existing_branch="$(parse_config "$name" "branch")"
+        existing_squash="$(parse_config "$name" "squash")"
+        
+        # Use existing values if not overridden
+        [[ -z "$path" ]] && path="$existing_path"
+        [[ -z "$url" ]] && url="$existing_url"
+        [[ -z "$branch" ]] && branch="$existing_branch"
+        [[ -n "$existing_squash" ]] && squash="$existing_squash"
+    fi
+    
+    # Validate required fields
+    [[ -z "$path" ]] && err "Missing required option: --path"
+    [[ -z "$url" ]] && err "Missing required option: --url"
+    [[ -z "$branch" ]] && branch="main"
+    
+    # Build git subtree add command
+    local args=(subtree add "--prefix=$path")
+    if [[ "$squash" == "true" ]]; then
+        args+=(--squash)
+    fi
+    args+=("$url" "$branch")
+    
+    # Execute git subtree add
+    run_cmd git "${args[@]}"
+    
+    # Update config after successful add
+    update_config "$name" "$path" "$url" "$branch" "$squash"
+    echo "Configuration saved to $CONFIG_FILE" >&2
+}
+
+# Execute git subtree pull
+cmd_pull() {
+    local name=""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                usage_pull
+                ;;
+            -*)
+                err "Unknown option: $1"
+                ;;
+            *)
+                if [[ -z "$name" ]]; then
+                    name="$1"
+                else
+                    err "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Auto-detect name if not provided
+    if [[ -z "$name" ]]; then
+        name="$(auto_detect_name)" || err "Could not auto-detect subtree name. Please provide the name as an argument."
+        echo "Auto-detected subtree name: $name" >&2
+    fi
+    
+    # Read config
+    local path url branch squash
+    path="$(parse_config "$name" "path")"
+    url="$(parse_config "$name" "url")"
+    branch="$(parse_config "$name" "branch")"
+    squash="$(parse_config "$name" "squash")"
+    
+    # Validate required fields
+    [[ -z "$path" ]] && err "Missing 'path' in config for subtree '$name'"
+    [[ -z "$url" ]] && err "Missing 'url' in config for subtree '$name'"
+    [[ -z "$branch" ]] && branch="main"
+    
+    # Default squash to true if missing
+    [[ -z "$squash" ]] && squash="true"
+    
+    # Build git subtree pull command
+    local args=(subtree pull "--prefix=$path")
+    if [[ "$squash" == "true" ]]; then
+        args+=(--squash)
+    fi
+    args+=("$url" "$branch")
+    
+    # Execute git subtree pull
+    run_cmd git "${args[@]}"
+}
+
+# Execute git subtree push
+cmd_push() {
+    local name=""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                usage_push
+                ;;
+            -*)
+                err "Unknown option: $1"
+                ;;
+            *)
+                if [[ -z "$name" ]]; then
+                    name="$1"
+                else
+                    err "Unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Auto-detect name if not provided
+    if [[ -z "$name" ]]; then
+        name="$(auto_detect_name)" || err "Could not auto-detect subtree name. Please provide the name as an argument."
+        echo "Auto-detected subtree name: $name" >&2
+    fi
+    
+    # Read config
+    local path url branch
+    path="$(parse_config "$name" "path")"
+    url="$(parse_config "$name" "url")"
+    branch="$(parse_config "$name" "branch")"
+    
+    # Validate required fields
+    [[ -z "$path" ]] && err "Missing 'path' in config for subtree '$name'"
+    [[ -z "$url" ]] && err "Missing 'url' in config for subtree '$name'"
+    [[ -z "$branch" ]] && branch="main"
+    
+    # Build git subtree push command (never use --squash)
+    local args=(subtree push "--prefix=$path" "$url" "$branch")
+    
+    # Execute git subtree push
+    run_cmd git "${args[@]}"
+}
+
+# Main entry point
+main() {
+    # Check for --install first (works outside repo)
+    if [[ "${1:-}" == "--install" ]]; then
+        install_aliases
+    fi
+    
+    # Check for --help
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+        local cmd
+        cmd="$(get_command)"
+        case "$cmd" in
+            add) usage_add ;;
+            pull) usage_pull ;;
+            push) usage_push ;;
+            *) usage_main ;;
+        esac
+    fi
+    
+    # Initialize repo (required for all non-install commands)
+    init_repo
+    
+    # Get command from script name
+    local cmd
+    cmd="$(get_command)"
+    
+    # If no command detected, show usage
+    if [[ -z "$cmd" ]]; then
+        usage_main
+    fi
+    
+    # Execute the appropriate command
+    case "$cmd" in
+        add)
+            cmd_add "$@"
+            ;;
+        pull)
+            cmd_pull "$@"
+            ;;
+        push)
+            cmd_push "$@"
+            ;;
+        *)
+            err "Unknown command: $cmd"
+            ;;
+    esac
+}
+
+# Run main function
+main "$@"

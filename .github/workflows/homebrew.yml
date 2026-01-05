@@ -1,0 +1,107 @@
+name: Publish Homebrew Formula
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get release info
+        id: release
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            TARBALL_URL="${{ github.event.release.tarball_url }}"
+          else
+            # For manual workflow dispatch, use latest tag
+            VERSION=$(git describe --tags --abbrev=0)
+            TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
+          fi
+          echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
+
+      - name: Download tarball and calculate SHA256
+        id: sha
+        run: |
+          curl -sL "${{ steps.release.outputs.tarball_url }}" -o tarball.tar.gz
+          SHA256=$(sha256sum tarball.tar.gz | awk '{print $1}')
+          echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+
+      - name: Generate Homebrew Formula
+        run: |
+          cat > git-subtree.rb <<EOF
+          class GitSubtree < Formula
+            desc "Wrapper around git subtree with configuration file support"
+            homepage "https://github.com/${{ github.repository }}"
+            url "${{ steps.release.outputs.tarball_url }}"
+            version "${{ steps.release.outputs.version }}"
+            sha256 "${{ steps.sha.outputs.sha256 }}"
+            license "Apache-2.0"
+
+            def install
+              bin.install "git-subtree.sh"
+              
+              # Create symlinks
+              bin.install_symlink bin/"git-subtree.sh" => "git-sub-add"
+              bin.install_symlink bin/"git-subtree.sh" => "git-sub-pull"
+              bin.install_symlink bin/"git-subtree.sh" => "git-sub-push"
+              
+              # Install example config
+              (prefix/"share/git-subtree").install "subtree.conf.example"
+            end
+
+            def caveats
+              <<~EOS
+                To use git-subtree:
+                
+                1. Create a .git/subtree.conf file in your repository
+                   Example: #{prefix}/share/git-subtree/subtree.conf.example
+                
+                2. Use the commands:
+                   git-sub-add <name>
+                   git-sub-pull <name>
+                   git-sub-push <name>
+                
+                3. Or install git aliases:
+                   git-subtree.sh --install
+              EOS
+            end
+
+            test do
+              assert_match "git-subtree", shell_output("#{bin}/git-subtree.sh --help")
+            end
+          end
+          EOF
+          cat git-subtree.rb
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Update formula in tap
+        run: |
+          mkdir -p homebrew-tap/Formula
+          cp git-subtree.rb homebrew-tap/Formula/git-subtree.rb
+          cd homebrew-tap
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add Formula/git-subtree.rb
+          git commit -m "Update git-subtree to ${{ steps.release.outputs.version }}" || echo "No changes to commit"
+          git push || echo "Nothing to push"
+
+      - name: Upload formula as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: git-subtree.rb
