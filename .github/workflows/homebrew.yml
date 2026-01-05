@@ -4,6 +4,10 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: false
 
 jobs:
   update-formula:
@@ -17,25 +21,36 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             VERSION="${{ github.event.release.tag_name }}"
-            TARBALL_URL="${{ github.event.release.tarball_url }}"
+            TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
           else
-            # For manual workflow dispatch, use latest tag
-            VERSION=$(git describe --tags --abbrev=0)
+            # For manual workflow dispatch without version, use latest tag
+            VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.1.0")
             TARBALL_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz"
           fi
-          echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          # Remove 'v' prefix for version number
+          VERSION_NUMBER="${VERSION#v}"
+          echo "version=${VERSION_NUMBER}" >> $GITHUB_OUTPUT
+          echo "version_tag=${VERSION}" >> $GITHUB_OUTPUT
           echo "tarball_url=${TARBALL_URL}" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION (number: $VERSION_NUMBER)"
+          echo "Tarball URL: $TARBALL_URL"
 
       - name: Download tarball and calculate SHA256
         id: sha
         run: |
+          echo "Downloading ${{ steps.release.outputs.tarball_url }}"
           curl -sL "${{ steps.release.outputs.tarball_url }}" -o tarball.tar.gz
           SHA256=$(sha256sum tarball.tar.gz | awk '{print $1}')
           echo "sha256=${SHA256}" >> $GITHUB_OUTPUT
+          echo "SHA256: $SHA256"
+          ls -lh tarball.tar.gz
 
       - name: Generate Homebrew Formula
         run: |
-          cat > git-subtree.rb <<EOF
+          cat > git-subtree.rb <<'EOF'
           class GitSubtree < Formula
             desc "Wrapper around git subtree with configuration file support"
             homepage "https://github.com/${{ github.repository }}"
@@ -44,64 +59,129 @@ jobs:
             sha256 "${{ steps.sha.outputs.sha256 }}"
             license "Apache-2.0"
 
+            depends_on "git"
+
             def install
-              bin.install "git-subtree.sh"
+              bin.install "bin/git-subtree-helper"
               
               # Create symlinks
-              bin.install_symlink bin/"git-subtree.sh" => "git-sub-add"
-              bin.install_symlink bin/"git-subtree.sh" => "git-sub-pull"
-              bin.install_symlink bin/"git-subtree.sh" => "git-sub-push"
+              bin.install_symlink bin/"git-subtree-helper" => "git-sub-add"
+              bin.install_symlink bin/"git-subtree-helper" => "git-sub-pull"
+              bin.install_symlink bin/"git-subtree-helper" => "git-sub-push"
               
               # Install example config
-              (prefix/"share/git-subtree").install "subtree.conf.example"
+              (pkgshare/"examples").install "subtree.conf.example"
             end
 
             def caveats
               <<~EOS
-                To use git-subtree:
+                git-subtree has been installed!
                 
-                1. Create a .git/subtree.conf file in your repository
-                   Example: #{prefix}/share/git-subtree/subtree.conf.example
+                To get started:
                 
-                2. Use the commands:
-                   git-sub-add <name>
+                1. (Optional) Install git aliases:
+                   git-subtree-helper --install
+                   
+                   This creates global aliases:
+                     git sub-add, git sub-pull, git sub-push
+                
+                2. In your git repository, create .git/subtree.conf:
+                   [subtree "name"]
+                   path = local/path
+                   url = https://github.com/user/repo.git
+                   branch = main
+                   squash = true
+                
+                3. Use the commands:
+                   git-sub-add <name> --path <path> --url <url>
                    git-sub-pull <name>
                    git-sub-push <name>
                 
-                3. Or install git aliases:
-                   git-subtree.sh --install
+                Example configuration:
+                  #{pkgshare}/examples/subtree.conf.example
+                
+                Documentation:
+                  https://github.com/${{ github.repository }}
               EOS
             end
 
             test do
-              assert_match "git-subtree", shell_output("#{bin}/git-subtree.sh --help")
+              assert_match "git-subtree-helper", shell_output("#{bin}/git-subtree-helper --help")
+              assert_match "git-sub-add", shell_output("#{bin}/git-sub-add --help")
             end
           end
           EOF
+          
+          echo "Generated formula:"
           cat git-subtree.rb
 
-      - name: Checkout homebrew-tap
+      - name: Validate formula syntax
+        run: |
+          # Basic validation - check for required fields
+          grep -q "class GitSubtree" git-subtree.rb
+          grep -q "desc" git-subtree.rb
+          grep -q "homepage" git-subtree.rb
+          grep -q "url" git-subtree.rb
+          grep -q "sha256" git-subtree.rb
+          echo "Formula validation passed"
+
+      - name: Create release artifact
+        run: |
+          mkdir -p release
+          cp git-subtree.rb release/
+          tar -czf release/git-subtree-${{ steps.release.outputs.version }}.tar.gz bin/ subtree.conf.example README.md LICENSE
+          cd release
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload formula as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula-${{ steps.release.outputs.version }}
+          path: |
+            git-subtree.rb
+            release/
+
+      - name: Checkout homebrew-tap repository
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/homebrew-tap
           path: homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN || secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        id: checkout-tap
 
       - name: Update formula in tap
+        if: steps.checkout-tap.outcome == 'success'
         run: |
-          mkdir -p homebrew-tap/Formula
-          cp git-subtree.rb homebrew-tap/Formula/git-subtree.rb
           cd homebrew-tap
+          mkdir -p Formula
+          cp ../git-subtree.rb Formula/git-subtree.rb
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           git add Formula/git-subtree.rb
-          git commit -m "Update git-subtree to ${{ steps.release.outputs.version }}" || echo "No changes to commit"
-          git push || echo "Nothing to push"
+          if git diff --staged --quiet; then
+            echo "No changes to formula"
+          else
+            git commit -m "Update git-subtree formula to ${{ steps.release.outputs.version }}"
+            git push
+            echo "Formula updated successfully"
+          fi
+        continue-on-error: true
 
-      - name: Upload formula as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: homebrew-formula
-          path: git-subtree.rb
+      - name: Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.release.outputs.version_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tarball**: ${{ steps.release.outputs.tarball_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA256**: \`${{ steps.sha.outputs.sha256 }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Installation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "brew install ${{ github.repository_owner }}/tap/git-subtree" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
