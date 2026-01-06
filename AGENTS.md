@@ -115,6 +115,7 @@ Behavior:
 - Run:
   - `git subtree add --prefix <path> <url> <branch> --squash` **only if** squash=true
   - If squash=false, do not pass `--squash`.
+  - After successful add, **always** run `git subtree split --prefix <path> --rejoin` to optimize future operations.
 - After success, persist `path`, `url`, `branch`, `squash` to `subtree.conf`.
 - Create `subtree.conf` if missing.
 
@@ -130,6 +131,7 @@ Behavior:
 - Include `--squash` **IFF**:
   - config has `squash=true`, or
   - `squash` key is missing
+- After successful pull, **always** run `git subtree split --prefix <path> --rejoin` to optimize future operations.
 - Never modify `subtree.conf`.
 
 ### `git-sub-push [name]`

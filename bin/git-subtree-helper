@@ -435,6 +435,9 @@ cmd_add() {
     # Execute git subtree add
     run_cmd git "${args[@]}"
     
+    # Run git subtree split with --rejoin to optimize future operations
+    run_cmd git subtree split "--prefix=$path" --rejoin
+    
     # Update config after successful add
     update_config "$name" "$path" "$url" "$branch" "$squash"
     echo "Configuration saved to $CONFIG_FILE" >&2
@@ -494,6 +497,9 @@ cmd_pull() {
     
     # Execute git subtree pull
     run_cmd git "${args[@]}"
+    
+    # Run git subtree split with --rejoin to optimize future operations
+    run_cmd git subtree split "--prefix=$path" --rejoin
 }
 
 # Execute git subtree push
